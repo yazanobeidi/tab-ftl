@@ -1,0 +1,1 @@
+python -W ignore::UserWarning run.py --device cpu --epochs 105 --model model --batches 10 --seed-range 8:28
