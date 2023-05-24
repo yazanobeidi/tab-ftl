@@ -77,6 +77,9 @@ To run an experiment with a specified range of random seeds, try the following. 
 
 Results will be printed to console, and to log file. For `cover`, this will be available in `tab-ftl/cover/logs`.
 
+Some experiments have a `--centralized` implementation which will run a single model over the full dataset to serve as a comparison. For example:
+
+`run.py --device cpu --epochs 105 --model model --batches 10 --experiment cover --centralized --seed-range 8:28`
 
 ## Tensorboard
 

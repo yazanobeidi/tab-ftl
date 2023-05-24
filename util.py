@@ -75,12 +75,14 @@ class multiline_tqdm(tqdm):
 
 def persist_run_impl(basepath):
     shutil.copytree(os.getcwd(), os.path.join(basepath, 'code_archive'), 
-        ignore=shutil.ignore_patterns("data", "notebooks", "log", 
-                ".ipynb_checkpoints", "modelarchive", "historic_logs"))
+        ignore=shutil.ignore_patterns("data", "notebooks", ".git", "log", 
+                ".ipynb_checkpoints", "modelarchive", "historic_logs", "oldlogs"))
 
-def import_model_loader(model_filename):
+def import_model_loader(model_filename, experiment='cover'):
     fname = model_filename.replace('/','').replace('.','')
-    print(f'loading model cover.models.{fname}')
-    return getattr(__import__(f'cover.models.{fname}', 
-                            fromlist=['load_covertype_models']), 
-                  'load_covertype_models')
+    print(f'loading model {experiment}.models.{fname}')
+    # for compatibility with older code
+    loader = 'load_covertype_models' if experiment == 'cover' else 'load_models'
+    return getattr(__import__(f'{experiment}.models.{fname}', 
+                            fromlist=[loader]), 
+                  loader)

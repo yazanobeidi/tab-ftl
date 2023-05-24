@@ -4,17 +4,19 @@ import pandas as pd
 import numpy as np
 from sklearn.preprocessing import LabelEncoder, OrdinalEncoder, StandardScaler
 from sklearn.compose import make_column_transformer, make_column_selector
+import os
 
 from util import set_random_seed, unfitted
 set_random_seed(42)
 
-PATH_TO_DATASET_DIR = 'cover/data/'
-COVER_WILDERNESS_SPLITS = ['comanche', 'neota', 'poudre', 'rawah']
-COVER_WILDERNESS_TRAIN_PREFIX = PATH_TO_DATASET_DIR+'covertype11_train_'
-COVER_WILDERNESS_TEST_PREFIX = PATH_TO_DATASET_DIR+'covertype11_test_'
-COVER_WILDERNESS_VAL_PREFIX = PATH_TO_DATASET_DIR+'covertype11_validation_'
+PATH_TO_DATASET_DIR = 'heart/data/{seed}/'
+# HEART_DISEASE_SPLITS = ['cleveland', 'hungarian', 'switzerland', 'va', 'sa', 'framingham', 'faisalabad']
+HEART_DISEASE_SPLITS = ['cleveland', 'sa', 'faisalabad']
+HEART_DISEASE_TRAIN_PREFIX = PATH_TO_DATASET_DIR+'heart_disease_train_'
+HEART_DISEASE_TEST_PREFIX = PATH_TO_DATASET_DIR+'heart_disease_test_'
+HEART_DISEASE_VAL_PREFIX = PATH_TO_DATASET_DIR+'heart_disease_validation_'
 
-class CovertypeDataset(Dataset):
+class HeartDataset(Dataset):
     def __init__(self, 
                  path_to_csv, 
                  seed,
@@ -82,18 +84,30 @@ class CovertypeDataset(Dataset):
         y = self.y[idx]
         return x, y
 
-def load_covertype(batches, drop_last, seed, device='cpu', 
-                   force_consistent_target_space=False, 
-                   force_consistent_feature_space=False, verbose=True):
-    if force_consistent_feature_space:
-        print('Found option --force-consistent-feature-space. '
-              'Cover experiment already has consistent feature spaces. Skipping.')
+def load_heart_disease(batches, drop_last, seed, device='cpu', 
+                       force_consistent_feature_space=False,
+                       force_consistent_target_space=False, verbose=True):
+    
+    cv_dataset_path = f"heart/data/{seed}/"
+    if not os.path.isdir(cv_dataset_path):
+        print(f'creating heart disease cross validation set for seed {seed} at {cv_dataset_path}')
+        from heart.prepare_heart_disease import prepare_heart_disease
+        os.mkdir(cv_dataset_path)
+        prepare_heart_disease(
+            path_to_dataset="heart/data/",
+            output_folder=cv_dataset_path,
+            test_size=0.33,
+            val_size=0.1,
+            make_binary=True,
+            seed=seed,
+            verbose=False
+        )
     if force_consistent_target_space:
         print('Found option --force-consistent-target-space. '
               'Preloading training sets and extracting global target space ...')
         def get_global_label_encoder(verbose):
-            train_data = {split:CovertypeDataset(COVER_WILDERNESS_TRAIN_PREFIX+f'{split}.csv', 
-                                         device=device, seed=seed) for split in COVER_WILDERNESS_SPLITS}
+            train_data = {split:HeartDataset(HEART_DISEASE_TRAIN_PREFIX.format(seed=seed)+f'{split}.csv', 
+                                         device=device, seed=seed) for split in HEART_DISEASE_SPLITS}
             psi = [d.label_encoder.inverse_transform(d.y.unique().tolist()) for d in train_data.values()]
             psi = list(set([float(e) for sublist in psi for e in sublist]))
             global_label_encoder = LabelEncoder()
@@ -106,24 +120,55 @@ def load_covertype(batches, drop_last, seed, device='cpu',
             return global_label_encoder
 
         global_label_encoder = get_global_label_encoder(verbose)
-        print(f'... Now reloading with obtained global target space: {global_label_encoder.classes_}:')
+        print(f'... Now loading with obtained global target space: {global_label_encoder.classes_}:')
     else:
         global_label_encoder = None
 
     train_data, test_data, val_data = dict(), dict(), dict()
 
-    for split in COVER_WILDERNESS_SPLITS:
-        train_data[split] = CovertypeDataset(COVER_WILDERNESS_TRAIN_PREFIX+f'{split}.csv', 
+    for split in HEART_DISEASE_SPLITS:
+        train_data[split] = HeartDataset(HEART_DISEASE_TRAIN_PREFIX.format(seed=seed)+f'{split}.csv', 
                                             device=device, seed=seed,
                                             label_encoder=global_label_encoder)
-        test_data[split] = CovertypeDataset(COVER_WILDERNESS_TEST_PREFIX+f'{split}.csv', 
+        test_data[split] = HeartDataset(HEART_DISEASE_TEST_PREFIX.format(seed=seed)+f'{split}.csv', 
                                             encoder=train_data[split].encoder,
                                             label_encoder=train_data[split].label_encoder, 
                                             device=device, seed=seed)
-        val_data[split] = CovertypeDataset(COVER_WILDERNESS_VAL_PREFIX+f'{split}.csv', 
+        val_data[split] = HeartDataset(HEART_DISEASE_VAL_PREFIX.format(seed=seed)+f'{split}.csv', 
                                             encoder=train_data[split].encoder,
                                             label_encoder=train_data[split].label_encoder, 
                                             device=device, seed=seed)
+
+    if force_consistent_feature_space:
+        print('Found option --force-consistent-target-space. '
+              'Aligning feature spaces and imputing with 0s')
+        def brute_force_align(datasets, train_data=None):
+            # unfortunately sklearn does not support column_transformer.inverse_transform yet
+            # dfs = {n:pd.DataFrame(d.encoder.inverse_transform(d.X.numpy()), 
+            #                       columns=d.columns) for n, d in datasets.items()}
+            dfs = {n:pd.read_csv(d.path_to_csv).drop('target', axis=1) for n, d in datasets.items()}
+            n = len(dfs)
+            k = list(dfs.keys())
+            for i in range(n-1):
+                for j in range(i+1, n):
+                    dfs[k[i]], dfs[k[j]] = dfs[k[i]].align(dfs[k[j]], join="outer", axis=1, fill_value=0)
+            for split, df in dfs.items():
+                if train_data is None:
+                    datasets[split].encoder.fit(df)
+                else: # re-use train encoder on other cv splits
+                    datasets[split].encoder = train_data[split].encoder
+                datasets[split].X = torch.tensor(datasets[split].encoder.transform(df), 
+                                                 dtype=torch.float32, device=device)
+                datasets[split].columns, datasets[split].old_columns = df.columns, datasets[split].columns
+
+        brute_force_align(train_data)
+        brute_force_align(test_data, train_data=train_data)
+        brute_force_align(val_data, train_data=train_data)
+
+        if verbose:
+            for split, dataset in train_data.items():
+                print(f'aligned {split}: expanded feature space dim from'
+                      f' {len(dataset.old_columns)} -> {len(dataset.columns)}')
 
     train_sizes = {n:len(s) for n,s in train_data.items()}
 
@@ -133,9 +178,12 @@ def load_covertype(batches, drop_last, seed, device='cpu',
 
     batch_sizes = get_batch_sizes(train_sizes, batches)
 
+    if verbose:
+        print('Batch sizes are set to: ', batch_sizes)
+
     trains, tests, vals = dict(), dict(), dict()
 
-    for split in COVER_WILDERNESS_SPLITS:
+    for split in HEART_DISEASE_SPLITS:
         # if the last dataloader batch is size 1, this will raise an issue with batchnorm
         # which by default uses the batch statistics.. calling eval() makes it use running statistcs
         # another option is to set drop_last=True in the DataLoaders
@@ -148,30 +196,5 @@ def load_covertype(batches, drop_last, seed, device='cpu',
         print('Label encodings are (we are using these):')
         for loader in trains.values():
             loader.dataset.show_label_encoder_info()
-
-    return trains, tests, vals
-
-def load_centralized_covertype(batches, drop_last, seed, device='cpu', 
-                   force_consistent_target_space=False, verbose=True):
-    train_data = CovertypeDataset(COVER_WILDERNESS_TRAIN_PREFIX[:-1]+'.csv',
-                                            device=device, seed=seed,
-                                            label_encoder=None)
-    test_data = CovertypeDataset(COVER_WILDERNESS_TEST_PREFIX[:-1]+'.csv',
-                                            encoder=train_data.encoder,
-                                            label_encoder=train_data.label_encoder, 
-                                            device=device, seed=seed)
-    val_data = CovertypeDataset(COVER_WILDERNESS_VAL_PREFIX[:-1]+'.csv',
-                                            encoder=train_data.encoder,
-                                            label_encoder=train_data.label_encoder, 
-                                            device=device, seed=seed)
-    batch_size = len(train_data) // batches
-    trains, tests, vals = dict(), dict(), dict()
-    trains['centralized'] = DataLoader(train_data, batch_size=batch_size, shuffle=True, drop_last=drop_last)
-    tests['centralized'] = DataLoader(test_data, batch_size=batch_size, shuffle=True)
-    vals['centralized'] = DataLoader(val_data, batch_size=batch_size, shuffle=True)
-
-    if verbose:
-        print('Label encodings are (we are using these):')
-        trains['centralized'].dataset.show_label_encoder_info()
 
     return trains, tests, vals
